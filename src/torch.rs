@@ -42,11 +42,11 @@
 //! read it the ld fashioned way using `storage` as the ZIP
 //! member filename.
 
-use std::{borrow::Cow, fs::File, io::Read, path::Path, str::FromStr};
+use crate::{ops::PickleOp, *};
 
 use anyhow::{anyhow, bail, ensure, Ok, Result};
 
-use crate::{ops::PickleOp, *};
+use std::{borrow::Cow, fs::File, io::Read, path::Path, str::FromStr};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TensorType {
@@ -140,20 +140,45 @@ pub struct RepugnantTorchTensor {
     pub requires_grad: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepugnantTorchTensors(pub Vec<RepugnantTorchTensor>);
+pub struct RepugnantTorchTensorsIter<'a> {
+    index: usize,
+    zipfile: &'a mut zip::ZipArchive<File>,
+    tensors: &'a mut [RepugnantTorchTensor],
+}
 
-impl IntoIterator for RepugnantTorchTensors {
-    type Item = RepugnantTorchTensor;
-
-    type IntoIter = std::vec::IntoIter<RepugnantTorchTensor>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+impl<'a> RepugnantTorchTensorsIter<'a> {
+    // FIXME FIXME: anyhow/result.
+    //pub fn next_tensor(&'a mut self) -> Option<(&'a RepugnantTorchTensor, Result<zip::read::ZipFile<'a>>)> {}
+    pub fn next_tensor(&'a mut self) -> Option<(&'a RepugnantTorchTensor, zip::read::ZipFile<'a>)> {
+        if self.index >= self.tensors.len() {
+            return None;
+        }
+        let idx = self.index;
+        self.index += 1;
+        // This actually shouldn't ever fail.
+        let zf = self.zipfile.by_name(&self.tensors[idx].storage)
+                             //.map_err(|_| anyhow!("Missing tensor storage in zip archive"));
+                             .unwrap();
+        // FIXME FIXME: before, was using anyhow ensure!.
+        assert_eq!(
+            zf.compression(), zip::CompressionMethod::STORE,
+            "Can't handle compressed tensor files",
+        );
+        if self.tensors[idx].absolute_offset == 0 {
+            let offs = self.tensors[idx].storage_offset;
+            self.tensors[idx].absolute_offset = zf.data_start() + offs;
+            assert!(self.tensors[idx].absolute_offset != 0);
+        }
+        Some((&self.tensors[idx], zf))
     }
 }
 
-impl RepugnantTorchTensors {
+pub struct RepugnantTorchFile {
+    zipfile: zip::ZipArchive<File>,
+    tensors: Vec<RepugnantTorchTensor>,
+}
+
+impl RepugnantTorchFile {
     pub fn new_from_file<P: AsRef<Path>>(filename: P) -> Result<Self> {
         let mut zp = zip::ZipArchive::new(File::open(filename)?)?;
 
@@ -164,6 +189,7 @@ impl RepugnantTorchTensors {
             .ok_or_else(|| anyhow!("Could not find data.pkl in archive"))?;
         let (pfx, _) = datafn.rsplit_once('/').unwrap();
         let mut zf = zp.by_name(&datafn)?;
+        println!("DEBUG: RepugnantTorchFile: compression={:?}", zf.compression());
         let mut buf = Vec::with_capacity(zf.size() as usize);
         let _ = zf.read_to_end(&mut buf)?;
         drop(zf);
@@ -174,8 +200,13 @@ impl RepugnantTorchTensors {
         // ensure!(!remain.is_empty(), "Unexpected remaining data in pickle");
 
         let (vals, _memo) = evaluate(&ops, true)?;
-        let val = match vals.as_slice() {
-            [Value::Build(a, _), ..] => a.as_ref(),
+        let vals = vals.as_slice();
+        let n_vals = vals.len();
+        println!("DEBUG: RepugnantTorchFile: vals.len={}", n_vals);
+        println!("DEBUG: RepugnantTorchFile: vals={:?}", vals);
+        let val = match (&vals, n_vals) {
+            (&[Value::Build(a, _), ..], _) => a.as_ref(),
+            (&[Value::Seq(..), ..], 1) => &vals[0],
             _ => bail!("Unexpected toplevel type"),
         };
         // Presumably this is usually going to be an OrderedDict, but maybe
@@ -194,6 +225,8 @@ impl RepugnantTorchTensors {
             Value::Seq(SequenceType::Dict, seq) => seq,
             _ => bail!("Unexpected type in Build"),
         };
+        //println!("DEBUG: RepugnantTorchFile: n_val={}", val.len());
+        //println!("DEBUG: RepugnantTorchFile: val={:?}", &val);
         let mut tensors = Vec::with_capacity(16);
         for di in val.iter() {
             let (k, v) = match di {
@@ -263,12 +296,6 @@ impl RepugnantTorchTensors {
 
             // println!("PID: file={sfile}, len={slen}, type={stype:?}, dev={sdev}");
 
-            // This actually shouldn't ever fail.
-            let zf = zp.by_name(&sfile)?;
-            ensure!(
-                zf.compression() == zip::CompressionMethod::STORE,
-                "Can't handle compressed files",
-            );
             let offs = offs * stype.size() as u64;
             tensors.push(RepugnantTorchTensor {
                 name: k.to_string(),
@@ -277,12 +304,25 @@ impl RepugnantTorchTensors {
                 storage: sfile,
                 storage_len: slen,
                 storage_offset: offs,
-                absolute_offset: zf.data_start() + offs,
+                /*absolute_offset: zf.data_start() + offs,*/
+                absolute_offset: 0,
                 shape,
                 stride,
                 requires_grad: grad,
             })
         }
-        Ok(Self(tensors))
+        Ok(Self{zipfile: zp, tensors})
+    }
+
+    pub fn tensors(&self) -> &[RepugnantTorchTensor] {
+        &self.tensors
+    }
+
+    pub fn iter_tensors_data<'a>(&'a mut self) -> RepugnantTorchTensorsIter<'a> {
+        RepugnantTorchTensorsIter{
+            index: 0,
+            zipfile: &mut self.zipfile,
+            tensors: &mut self.tensors,
+        }
     }
 }

@@ -1,9 +1,9 @@
-use std::borrow::Cow;
+use crate::bigint::BigInt;
+use crate::ops::PickleOp;
 
 use anyhow::Result;
-use num_bigint::BigInt;
 
-use crate::ops::PickleOp;
+use std::borrow::Cow;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 /// The types of sequences that exist.
@@ -91,9 +91,6 @@ pub enum Value<'a> {
 /// Attempt to fix up a value from `Value::Raw(...)` into something
 /// more reasonable.
 pub fn fix_value(val: Value<'_>) -> Result<Value<'_>> {
-    use once_cell::sync::Lazy;
-    static BI64MIN: Lazy<BigInt> = Lazy::new(|| BigInt::from(i64::MIN));
-    static BI64MAX: Lazy<BigInt> = Lazy::new(|| BigInt::from(i64::MAX));
     match val {
         Value::Raw(ref rv) => Ok(match rv.as_ref() {
             PickleOp::BININT(val) => Value::Int(*val as i64),
@@ -101,17 +98,15 @@ pub fn fix_value(val: Value<'_>) -> Result<Value<'_>> {
             PickleOp::BININT2(val) => Value::Int(*val as i64),
             PickleOp::LONG1(b) | PickleOp::LONG4(b) if !b.is_empty() => {
                 let blen = b.len();
-                let is_neg = b[blen - 1] & 80 != 0;
-                let mut bint = BigInt::from_bytes_le(num_bigint::Sign::Plus, b);
-                if is_neg {
-                    bint -= BigInt::from(1) << (blen * 8);
-                }
-                if &bint >= &BI64MIN && &bint <= &BI64MAX {
-                    (&bint)
-                        .try_into()
-                        .map_or_else(|_| Value::BigInt(bint), Value::Int)
-                } else {
-                    Value::BigInt(bint)
+                let (bpre, bsuf) = b.split_at(blen - 1);
+                let last_byte = bsuf[0] & 0x7f;
+                let neg = bsuf[0] & 0x80 != 0;
+                let mut bint = BigInt::from_le_bytes(bpre);
+                bint.push_le_byte(last_byte);
+                bint.set_sign(neg);
+                match bint.try_cast_to_i64() {
+                    Ok(x) => Value::Int(x),
+                    Err(_) => Value::BigInt(bint)
                 }
             }
             PickleOp::BINFLOAT(val) => Value::Float(*val),

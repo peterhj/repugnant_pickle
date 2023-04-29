@@ -1,16 +1,19 @@
 [package]
-name = "repugnant-pickle"
+name = "repugnant_pickle"
 version = "0.0.1"
-edition = "2021"
-resolver = "2"
-
-[features]
-default = []
-torch = ["zip"]
+edition = "2018"
+license = "Apache-2.0"
+#resolver = "2"
 
 [dependencies]
-anyhow = "1"
-nom = "7.1"
-once_cell ="1"
-num-bigint = "0.4"
-zip = { version = "0.6", optional = true }
+#airpiz = { path = "../airpiz" }
+#anyhow = "1"
+anyhow = { path = "../anyhow" }
+#nom = "7.1"
+nom = { path = "../nom" }
+#num-bigint = "0.4"
+#num_bigint = { path = "../num_bigint" }
+#once_cell ="1"
+#once_cell = { path = "../once_cell" }
+#zip = { version = "0.6", optional = true }
+zip = { path = "../zip" }

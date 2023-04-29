@@ -1,11 +1,11 @@
-use std::str::Utf8Error;
+use crate::ops::*;
 
 use nom::{
     bytes::complete::*, combinator::*, error as ne, multi::*, number::complete::*, sequence::tuple,
     *,
 };
 
-use crate::ops::*;
+use std::str::Utf8Error;
 
 fn parse_string_nl<'a, E>(i: &'a [u8]) -> IResult<&'a [u8], &'a str, E>
 where

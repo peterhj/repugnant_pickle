@@ -1,12 +1,12 @@
 use crate::{ops::*, value::*};
 
+use anyhow::{anyhow, bail, ensure, Ok, Result};
+
 use std::{
     borrow::Cow,
     collections::BTreeMap,
     ops::{Deref, DerefMut},
 };
-
-use anyhow::{anyhow, bail, ensure, Ok, Result};
 
 const MAX_DEPTH: usize = 250;
 const MAX_PROTOCOL: u8 = 5;
@@ -196,9 +196,10 @@ pub fn evaluate<'a>(
         Ok(kvitems)
     }
 
-    for op in x.iter() {
+    for (i, op) in x.iter().enumerate() {
         let stack = &mut stack;
 
+        //println!("DEBUG: evaluate: i={} op={:?}", i, op);
         match op {
             PickleOp::MARK => stack.push(Value::Raw(Cow::Borrowed(op))),
             PickleOp::STOP => break,
@@ -259,7 +260,7 @@ pub fn evaluate<'a>(
                     .ok_or_else(|| anyhow!("Unexpected empty stack"))?;
                 let rtop = memo.resolve_mut(top, true)?;
                 match rtop {
-                    Value::Global(_, args) | Value::Seq(_, args) => {
+                    Value::Global(_, args) | Value::Seq(SequenceType::Dict, args) => {
                         args.push(Value::Seq(SequenceType::Tuple, vec![k, v]));
                     }
                     _wut => bail!("Bad stack top for SETITEM!"),
@@ -272,8 +273,8 @@ pub fn evaluate<'a>(
                     .ok_or_else(|| anyhow!("Unexpected empty stack"))?;
                 let rtop = memo.resolve_mut(top, true)?;
                 match rtop {
-                    Value::Global(_, args) | Value::Seq(_, args) => {
-                        args.push(Value::Seq(SequenceType::Tuple, kvitems));
+                    Value::Global(_, args) | Value::Seq(SequenceType::Dict, args) => {
+                        args.extend(kvitems);
                     }
                     _wut => bail!("Bad stack top for SETITEMS"),
                 }
@@ -300,7 +301,7 @@ pub fn evaluate<'a>(
                     .ok_or_else(|| anyhow!("Unexpected empty stack"))?;
                 let rtop = memo.resolve_mut(top, true)?;
                 match rtop {
-                    Value::Global(_, args) | Value::Seq(_, args) => {
+                    Value::Global(_, args) | Value::Seq(SequenceType::List, args) => {
                         args.push(v);
                     }
                     _wut => bail!("Bad stack top for APPEND!"),
@@ -314,7 +315,7 @@ pub fn evaluate<'a>(
                 let rtop = memo.resolve_mut(top, true)?;
 
                 match rtop {
-                    Value::Global(_, args) | Value::Seq(_, args) => {
+                    Value::Global(_, args) | Value::Seq(SequenceType::List, args) => {
                         args.extend(postmark);
                     }
                     _wut => bail!("Bad stack top for APPENDS"),
@@ -365,7 +366,7 @@ pub fn evaluate<'a>(
                 let rtop = memo.resolve_mut(top, true)?;
 
                 match rtop {
-                    Value::Global(_, args) | Value::Seq(_, args) => {
+                    Value::Global(_, args) | Value::Seq(SequenceType::Set, args) => {
                         args.extend(postmark);
                     }
                     _wut => bail!("Bad stack top for ADDITEMS"),

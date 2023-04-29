@@ -59,27 +59,23 @@
 //! )]
 //! ```
 
+extern crate anyhow;
+extern crate nom;
+extern crate zip;
+
+pub mod bigint;
 /// Functions used for evaluating Pickle operations.
 pub mod eval;
-
 /// Pickle operations.
 pub mod ops;
-
 /// Parsers for converting `&[u8]` into a list of
 /// Pickle operations.
 pub mod parsers;
-
+pub mod torch;
 /// The Value type you can get from evaluating pickle operations.
 pub mod value;
 
-#[cfg(feature = "torch")]
-pub mod torch;
-
 pub use crate::eval::evaluate;
-
 pub use crate::parsers::parse_ops;
-
-#[cfg(feature = "torch")]
-pub use crate::torch::{RepugnantTorchTensor, RepugnantTorchTensors, TensorType};
-
+pub use crate::torch::{RepugnantTorchTensor, RepugnantTorchFile, TensorType};
 pub use crate::value::{SequenceType, Value};
