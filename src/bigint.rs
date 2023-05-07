@@ -1,11 +1,35 @@
-// Based on the implementation in libcore.
+/* Derived from the implementation in libcore.
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE. */
 
 use std::fmt;
 
 pub struct BigInt {
-    bytesize: usize,
-    base: Vec<u64>,
-    neg:  bool,
+    bytesize:   usize,
+    base:       Vec<u64>,
+    neg:        bool,
 }
 
 impl BigInt {
@@ -74,11 +98,22 @@ impl BigInt {
         } else {
             return Err(());
         }
-        // FIXME: technically, the last word should be checked bytewise.
-        for k in 1 .. (self.bytesize + 8 - 1) / 8 {
+        let word_lo = self.bytesize / 8;
+        for k in 1 .. word_lo {
             let u = self.base[k];
             if u != 0 {
                 return Err(());
+            }
+        }
+        let align_lo = word_lo * 8;
+        if align_lo < self.bytesize {
+            let last_word = self.base[word_lo];
+            for p in align_lo .. self.bytesize {
+                let offset = p - align_lo;
+                let byte = (last_word >> (offset * 8)) as u8;
+                if byte != 0 {
+                    return Err(());
+                }
             }
         }
         Ok(ret)
@@ -105,10 +140,11 @@ impl PartialEq for BigInt {
         if align_lo < self.bytesize {
             let u1 = self.base[word_lo];
             let u2 = other.base[word_lo];
-            for i in align_lo .. self.bytesize {
-                let v1 = u1 >> ((i - align_lo) * 8);
-                let v2 = u2 >> ((i - align_lo) * 8);
-                if v1 != v2 {
+            for p in align_lo .. self.bytesize {
+                let offset = p - align_lo;
+                let byte1 = (u1 >> (offset * 8)) as u8;
+                let byte2 = (u2 >> (offset * 8)) as u8;
+                if byte1 != byte2 {
                     return false;
                 }
             }

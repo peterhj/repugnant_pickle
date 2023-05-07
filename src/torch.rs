@@ -48,7 +48,7 @@ use anyhow::{anyhow, bail, ensure, Ok, Result};
 
 use std::{borrow::Cow, fs::File, io::Read, path::Path, str::FromStr};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorType {
     Float64,
     Float32,
@@ -58,15 +58,18 @@ pub enum TensorType {
     Int32,
     Int16,
     Int8,
+    UInt64,
+    UInt32,
+    UInt16,
     UInt8,
-    Unknown(String),
+    //Unknown(String),
 }
 
 impl TensorType {
     /// Get the item size for this tensor type. However,
     /// the type of Unknown tensor types is... well,
     /// unknown. So you get 0 back there.
-    pub fn size(&self) -> usize {
+    pub fn size_bytes(&self) -> usize {
         match self {
             TensorType::Float64 => 8,
             TensorType::Float32 => 4,
@@ -76,18 +79,22 @@ impl TensorType {
             TensorType::Int32 => 4,
             TensorType::Int16 => 2,
             TensorType::Int8 => 1,
+            TensorType::UInt64 => 8,
+            TensorType::UInt32 => 4,
+            TensorType::UInt16 => 2,
             TensorType::UInt8 => 1,
-            TensorType::Unknown(_) => 0,
+            //TensorType::Unknown(_) => 0,
         }
     }
 }
 
 impl FromStr for TensorType {
-    type Err = std::convert::Infallible;
+    //type Err = std::convert::Infallible;
+    type Err = String;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let s = s.strip_suffix("Storage").unwrap_or(s).to_ascii_lowercase();
-        Result::Ok(match s.as_str() {
+        std::result::Result::Ok(match s.as_str() {
             "float64" | "double" => Self::Float64,
             "float32" | "float" => Self::Float32,
             "float16" | "half" => Self::Float16,
@@ -96,8 +103,12 @@ impl FromStr for TensorType {
             "int32" | "int" => Self::Int32,
             "int16" | "short" => Self::Int16,
             "int8" | "char" => Self::Int8,
+            "uint64" => Self::UInt64,
+            "uint32" => Self::UInt32,
+            "uint16" => Self::UInt16,
             "uint8" | "byte" => Self::UInt8,
-            _ => Self::Unknown(s),
+            //_ => Self::Unknown(s),
+            _ => return Err(s)
         })
     }
 }
@@ -111,7 +122,7 @@ pub struct RepugnantTorchTensor {
     pub device: String,
 
     /// Type of tensor.
-    pub tensor_type: TensorType,
+    pub tensor_type: std::result::Result<TensorType, String>,
 
     /// The filename in the ZIP which has storage for this tensor.
     pub storage: String,
@@ -179,7 +190,7 @@ pub struct RepugnantTorchFile {
 }
 
 impl RepugnantTorchFile {
-    pub fn new_from_file<P: AsRef<Path>>(filename: P) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(filename: P) -> Result<Self> {
         let mut zp = zip::ZipArchive::new(File::open(filename)?)?;
 
         let datafn = zp
@@ -189,7 +200,7 @@ impl RepugnantTorchFile {
             .ok_or_else(|| anyhow!("Could not find data.pkl in archive"))?;
         let (pfx, _) = datafn.rsplit_once('/').unwrap();
         let mut zf = zp.by_name(&datafn)?;
-        println!("DEBUG: RepugnantTorchFile: compression={:?}", zf.compression());
+        //println!("DEBUG: RepugnantTorchFile: compression={:?}", zf.compression());
         let mut buf = Vec::with_capacity(zf.size() as usize);
         let _ = zf.read_to_end(&mut buf)?;
         drop(zf);
@@ -201,12 +212,17 @@ impl RepugnantTorchFile {
 
         let (vals, _memo) = evaluate(&ops, true)?;
         let vals = vals.as_slice();
-        let n_vals = vals.len();
-        println!("DEBUG: RepugnantTorchFile: vals.len={}", n_vals);
-        println!("DEBUG: RepugnantTorchFile: vals={:?}", vals);
-        let val = match (&vals, n_vals) {
+        //let n_vals = vals.len();
+        //println!("DEBUG: RepugnantTorchFile: vals.len={}", n_vals);
+        //println!("DEBUG: RepugnantTorchFile: vals={:?}", vals);
+        /*let val = match (&vals, n_vals) {
             (&[Value::Build(a, _), ..], _) => a.as_ref(),
             (&[Value::Seq(..), ..], 1) => &vals[0],
+            _ => bail!("Unexpected toplevel type"),
+        };*/
+        let val = match &vals {
+            &[Value::Build(a, _), ..] => a.as_ref(),
+            &[Value::Seq(..)] => &vals[0],
             _ => bail!("Unexpected toplevel type"),
         };
         // Presumably this is usually going to be an OrderedDict, but maybe
@@ -289,14 +305,12 @@ impl RepugnantTorchFile {
                 },
                 _ => bail!("Unexpected value for persistant ID"),
             };
-            let stype: TensorType = stype
-                .parse()
-                .expect("Impossible: Parsing tensor type failed");
+            let stype = TensorType::from_str(stype);
             let sfile = format!("{pfx}/data/{sfile}");
 
             // println!("PID: file={sfile}, len={slen}, type={stype:?}, dev={sdev}");
 
-            let offs = offs * stype.size() as u64;
+            let offs = offs * stype.as_ref().map(|t| t.size_bytes() as u64).unwrap_or(0);
             tensors.push(RepugnantTorchTensor {
                 name: k.to_string(),
                 device: sdev.to_string(),
