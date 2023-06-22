@@ -15,5 +15,6 @@ nom = { path = "../nom" }
 #num_bigint = { path = "../num_bigint" }
 #once_cell ="1"
 #once_cell = { path = "../once_cell" }
+smol_str = { path = "../smol_str", default_features = false }
 #zip = { version = "0.6", optional = true }
 zip = { path = "../zip" }

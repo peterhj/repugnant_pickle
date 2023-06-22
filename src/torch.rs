@@ -45,6 +45,7 @@
 use crate::{ops::PickleOp, *};
 
 use anyhow::{anyhow, bail, ensure, Ok, Result};
+use smol_str::{SmolStr};
 
 use std::{borrow::Cow, fs::File, io::Read, path::Path, str::FromStr};
 
@@ -90,7 +91,7 @@ impl TensorType {
 
 impl FromStr for TensorType {
     //type Err = std::convert::Infallible;
-    type Err = String;
+    type Err = SmolStr;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let s = s.strip_suffix("Storage").unwrap_or(s).to_ascii_lowercase();
@@ -108,7 +109,7 @@ impl FromStr for TensorType {
             "uint16" => Self::UInt16,
             "uint8" | "byte" => Self::UInt8,
             //_ => Self::Unknown(s),
-            _ => return Err(s)
+            _ => return Err(s.into())
         })
     }
 }
@@ -116,16 +117,16 @@ impl FromStr for TensorType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepugnantTorchTensor {
     /// Tensor name.
-    pub name: String,
+    pub name: SmolStr,
 
     /// Device
-    pub device: String,
+    pub device: SmolStr,
 
     /// Type of tensor.
-    pub tensor_type: std::result::Result<TensorType, String>,
+    pub tensor_type: std::result::Result<TensorType, SmolStr>,
 
     /// The filename in the ZIP which has storage for this tensor.
-    pub storage: String,
+    pub storage: SmolStr,
 
     /// Total length (in bytes) for the entire storage item.
     /// Note that multiple tensors can point to different ranges
@@ -142,10 +143,10 @@ pub struct RepugnantTorchTensor {
     pub absolute_offset: u64,
 
     /// The tensor shape (dimensions).
-    pub shape: Vec<usize>,
+    pub shape: Vec<i64>,
 
     /// The tensor stride.
-    pub stride: Vec<usize>,
+    pub stride: Vec<i64>,
 
     /// Whether the tensor requires gradients enabled.
     pub requires_grad: bool,
@@ -283,7 +284,7 @@ impl RepugnantTorchFile {
             let fixdim = |v: &[Value]| {
                 v.iter()
                     .map(|x| match x {
-                        Value::Int(n) => Ok(*n as usize),
+                        Value::Int(n) => Ok(*n),
                         _ => bail!("Bad value for shape/stride item"),
                     })
                     .collect::<Result<Vec<_>>>()
@@ -311,11 +312,11 @@ impl RepugnantTorchFile {
             // println!("PID: file={sfile}, len={slen}, type={stype:?}, dev={sdev}");
 
             let offs = offs * stype.as_ref().map(|t| t.size_bytes() as u64).unwrap_or(0);
-            tensors.push(RepugnantTorchTensor {
-                name: k.to_string(),
-                device: sdev.to_string(),
+            tensors.push(RepugnantTorchTensor{
+                name: k.into(),
+                device: sdev.into(),
                 tensor_type: stype,
-                storage: sfile,
+                storage: sfile.into(),
                 storage_len: slen,
                 storage_offset: offs,
                 /*absolute_offset: zf.data_start() + offs,*/

@@ -61,6 +61,7 @@
 
 extern crate anyhow;
 extern crate nom;
+extern crate smol_str;
 extern crate zip;
 
 pub mod bigint;
