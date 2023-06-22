@@ -159,7 +159,31 @@ pub struct RepugnantTorchTensorsIter<'a> {
 }
 
 impl<'a> RepugnantTorchTensorsIter<'a> {
-    // FIXME FIXME: anyhow/result.
+    pub fn _fixup_offsets(&mut self) {
+        loop {
+            if self.index >= self.tensors.len() {
+                return;
+            }
+            let idx = self.index;
+            self.index += 1;
+            // This actually shouldn't ever fail.
+            let zf = self.zipfile.by_name(&self.tensors[idx].storage)
+                                 //.map_err(|_| anyhow!("Missing tensor storage in zip archive"));
+                                 .unwrap();
+            // FIXME FIXME: before, was using anyhow ensure!.
+            assert_eq!(
+                zf.compression(), zip::CompressionMethod::STORE,
+                "Can't handle compressed tensor files",
+            );
+            if self.tensors[idx].absolute_offset == 0 {
+                let offs = self.tensors[idx].storage_offset;
+                self.tensors[idx].absolute_offset = zf.data_start() + offs;
+                assert!(self.tensors[idx].absolute_offset != 0);
+            }
+        }
+    }
+
+    /*// FIXME FIXME: anyhow/result.
     //pub fn next_tensor(&'a mut self) -> Option<(&'a RepugnantTorchTensor, Result<zip::read::ZipFile<'a>>)> {}
     pub fn next_tensor(&'a mut self) -> Option<(&'a RepugnantTorchTensor, zip::read::ZipFile<'a>)> {
         if self.index >= self.tensors.len() {
@@ -182,7 +206,7 @@ impl<'a> RepugnantTorchTensorsIter<'a> {
             assert!(self.tensors[idx].absolute_offset != 0);
         }
         Some((&self.tensors[idx], zf))
-    }
+    }*/
 }
 
 pub struct RepugnantTorchFile {
