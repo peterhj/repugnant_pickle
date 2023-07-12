@@ -47,7 +47,7 @@ use crate::{ops::PickleOp, *};
 use anyhow::{anyhow, bail, ensure, Ok, Result};
 use smol_str::{SmolStr};
 
-use std::{borrow::Cow, fs::File, io::Read, path::Path, str::FromStr};
+use std::{borrow::Cow, fs::File, io::Read, io::Seek, path::Path, str::FromStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorType {
@@ -152,13 +152,13 @@ pub struct RepugnantTorchTensor {
     pub requires_grad: bool,
 }
 
-pub struct RepugnantTorchTensorsIter<'a> {
+pub struct RepugnantTorchTensorsIter<'a, R> {
     index: usize,
-    zipfile: &'a mut zip::ZipArchive<File>,
+    zipfile: &'a mut zip::ZipArchive<R>,
     tensors: &'a mut [RepugnantTorchTensor],
 }
 
-impl<'a> RepugnantTorchTensorsIter<'a> {
+impl<'a, R: Read + Seek> RepugnantTorchTensorsIter<'a, R> {
     pub fn _fixup_offsets(&mut self) {
         loop {
             if self.index >= self.tensors.len() {
@@ -209,14 +209,20 @@ impl<'a> RepugnantTorchTensorsIter<'a> {
     }*/
 }
 
-pub struct RepugnantTorchFile {
-    zipfile: zip::ZipArchive<File>,
+pub struct RepugnantTorchFile<R=File> {
+    zipfile: zip::ZipArchive<R>,
     tensors: Vec<RepugnantTorchTensor>,
 }
 
 impl RepugnantTorchFile {
     pub fn open<P: AsRef<Path>>(filename: P) -> Result<Self> {
-        let mut zp = zip::ZipArchive::new(File::open(filename)?)?;
+        Self::new(File::open(filename)?)
+    }
+}
+
+impl<R: Read + Seek> RepugnantTorchFile<R> {
+    pub fn new(reader: R) -> Result<Self> {
+        let mut zp = zip::ZipArchive::new(reader)?;
 
         let datafn = zp
             .file_names()
@@ -357,7 +363,7 @@ impl RepugnantTorchFile {
         &self.tensors
     }
 
-    pub fn iter_tensors_data<'a>(&'a mut self) -> RepugnantTorchTensorsIter<'a> {
+    pub fn iter_tensors_data<'a>(&'a mut self) -> RepugnantTorchTensorsIter<'a, R> {
         RepugnantTorchTensorsIter{
             index: 0,
             zipfile: &mut self.zipfile,
