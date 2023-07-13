@@ -8,7 +8,7 @@ license = "Apache-2.0"
 [dependencies]
 #airpiz = { path = "../airpiz" }
 #anyhow = "1"
-anyhow = { path = "../anyhow" }
+#anyhow = { path = "../anyhow" }
 #nom = "7.1"
 nom = { path = "../nom" }
 #num-bigint = "0.4"

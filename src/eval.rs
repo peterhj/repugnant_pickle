@@ -1,40 +1,52 @@
 use crate::{ops::*, value::*};
 
-use anyhow::{anyhow, bail, ensure, Ok, Result};
+//use anyhow::{anyhow, bail, ensure, Ok, Result};
+use smol_str::SmolStr;
 
 use std::{
     borrow::Cow,
     collections::BTreeMap,
+    num::ParseIntError,
     ops::{Deref, DerefMut},
 };
 
 const MAX_DEPTH: usize = 250;
 const MAX_PROTOCOL: u8 = 5;
 
+#[derive(Debug)]
+pub enum PickleError {
+    StackUnderrun,
+    StackMissingMark,
+    UnexpectedEmptyStack,
+    BadMemoId,
+    ParseInt(ParseIntError),
+    Eval(SmolStr),
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 /// Basically just a Vec with some convenience functions.
 pub struct PickleStack<'a>(pub Vec<Value<'a>>);
 
 impl<'a> PickleStack<'a> {
-    pub fn pop(&mut self) -> Result<Value<'a>> {
-        self.0.pop().ok_or_else(|| anyhow!("Stack underrun"))
+    pub fn pop(&mut self) -> Result<Value<'a>, PickleError> {
+        self.0.pop().ok_or_else(|| PickleError::StackUnderrun)
     }
 
-    pub fn pop_mark(&mut self) -> Result<Vec<Value<'a>>> {
+    pub fn pop_mark(&mut self) -> Result<Vec<Value<'a>>, PickleError> {
         let markidx = self.find_mark()?;
         let postmark = self.0[markidx + 1..].to_owned();
         self.truncate(markidx);
         Ok(postmark)
     }
 
-    pub fn find_mark(&self) -> Result<usize> {
+    pub fn find_mark(&self) -> Result<usize, PickleError> {
         Ok(self
             .0
             .iter()
             .enumerate()
             .rfind(|(_idx, op)| matches!(op, Value::Raw(Cow::Borrowed(&PickleOp::MARK))))
             .map(|(idx, _)| idx)
-            .ok_or_else(|| anyhow!("Missing MARK"))?)
+            .ok_or_else(|| PickleError::StackMissingMark)?)
     }
 }
 
@@ -61,10 +73,10 @@ impl<'a> PickleMemo<'a> {
     /// other types. For example if you have `Ref(Ref(Ref(Ref(whatever))))`,
     /// you'll get `whatever` back. But if you have Something(Ref(whatever))
     /// it won't do anything.
-    pub fn resolve(&self, mut op: Value<'a>, recursive: bool) -> Result<Value<'a>> {
+    pub fn resolve(&self, mut op: Value<'a>, recursive: bool) -> Result<Value<'a>, PickleError> {
         let mut count = 0;
         while let Value::Ref(ref mid) = op {
-            let val = self.0.get(mid).ok_or_else(|| anyhow!("Bad memo id"))?;
+            let val = self.0.get(mid).ok_or_else(|| PickleError::BadMemoId)?;
             if !recursive {
                 return Ok(val.to_owned());
             }
@@ -88,7 +100,7 @@ impl<'a> PickleMemo<'a> {
         &'c mut self,
         op: &'b mut Value<'a>,
         recursive: bool,
-    ) -> Result<&'c mut Value<'a>>
+    ) -> Result<&'c mut Value<'a>, PickleError>
     where
         'b: 'c,
         'c: 'b,
@@ -100,7 +112,7 @@ impl<'a> PickleMemo<'a> {
         };
 
         let mut count = 0;
-        while let Value::Ref(mid) = self.0.get(&lastmid).ok_or_else(|| anyhow!("Bad memo id"))? {
+        while let Value::Ref(mid) = self.0.get(&lastmid).ok_or_else(|| PickleError::BadMemoId)? {
             lastmid = *mid;
             if !recursive {
                 break;
@@ -127,14 +139,14 @@ impl<'a> PickleMemo<'a> {
         depth: usize,
         vals: impl IntoIterator<Item = Value<'a>>,
         fix_values: bool,
-    ) -> Result<Vec<Value<'a>>> {
+    ) -> Result<Vec<Value<'a>>, PickleError> {
         if depth >= MAX_DEPTH {
             // Sometimes things just don't work out the way you hoped.
             return Ok(vals.into_iter().collect::<Vec<_>>());
         }
         vals.into_iter()
             .map(|val| self.resolve_all_refs(depth + 1, val, fix_values))
-            .collect::<Result<Vec<_>>>()
+            .collect::<Result<Vec<_>, PickleError>>()
     }
 
     /// Try to resolve all references.
@@ -145,7 +157,7 @@ impl<'a> PickleMemo<'a> {
         depth: usize,
         val: Value<'a>,
         fix_values: bool,
-    ) -> Result<Value<'a>> {
+    ) -> Result<Value<'a>, PickleError> {
         if depth >= MAX_DEPTH {
             // It be how it be.
             return Ok(val);
@@ -166,7 +178,7 @@ impl<'a> PickleMemo<'a> {
             val => val,
         };
         if fix_values {
-            fix_value(output)
+            Ok(fix_value(output))
         } else {
             Ok(output)
         }
@@ -181,12 +193,14 @@ impl<'a> PickleMemo<'a> {
 pub fn evaluate<'a>(
     x: &'a [PickleOp],
     resolve_refs: bool,
-) -> Result<(Vec<Value<'a>>, PickleMemo<'a>)> {
+) -> Result<(Vec<Value<'a>>, PickleMemo<'a>), PickleError> {
     let mut stack = PickleStack::default();
     let mut memo = PickleMemo::default();
 
-    fn make_kvlist(items: Vec<Value<'_>>) -> Result<Vec<Value<'_>>> {
-        ensure!(items.len() & 1 == 0, "Bad value for setitems");
+    fn make_kvlist(items: Vec<Value<'_>>) -> Result<Vec<Value<'_>>, PickleError> {
+        if !(items.len() & 1 == 0) {
+            return Err(PickleError::Eval("Bad value for SETITEMS".into()));
+        }
         let mut kvitems = Vec::with_capacity(items.len());
         let mut it = items.into_iter();
         while let Some(k) = it.next() {
@@ -196,7 +210,7 @@ pub fn evaluate<'a>(
         Ok(kvitems)
     }
 
-    for (i, op) in x.iter().enumerate() {
+    for (_i, op) in x.iter().enumerate() {
         let stack = &mut stack;
 
         //println!("DEBUG: evaluate: i={} op={:?}", i, op);
@@ -212,7 +226,7 @@ pub fn evaluate<'a>(
             PickleOp::DUP => {
                 let item = stack
                     .last()
-                    .ok_or_else(|| anyhow!("Cannot DUP with empty stack"))?
+                    .ok_or_else(|| PickleError::Eval("Cannot DUP with empty stack".into()))?
                     .to_owned();
                 stack.push(item);
             }
@@ -232,7 +246,7 @@ pub fn evaluate<'a>(
                 stack.push(Value::Build(target, args));
             }
             PickleOp::EMPTY_DICT => stack.push(Value::Seq(SequenceType::Dict, Default::default())),
-            PickleOp::GET(mids) => stack.push(Value::Ref(mids.parse()?)),
+            PickleOp::GET(mids) => stack.push(Value::Ref(mids.parse().map_err(|e| PickleError::ParseInt(e))?)),
             PickleOp::BINGET(mid) => stack.push(Value::Ref(*mid as u32)),
             PickleOp::LONG_BINGET(mid) => stack.push(Value::Ref(*mid)),
             PickleOp::EMPTY_LIST => stack.push(Value::Seq(SequenceType::List, Default::default())),
@@ -257,30 +271,36 @@ pub fn evaluate<'a>(
                 let k = stack.pop()?;
                 let top = stack
                     .last_mut()
-                    .ok_or_else(|| anyhow!("Unexpected empty stack"))?;
+                    .ok_or_else(|| PickleError::UnexpectedEmptyStack)?;
                 let rtop = memo.resolve_mut(top, true)?;
                 match rtop {
                     Value::Global(_, args) | Value::Seq(SequenceType::Dict, args) => {
                         args.push(Value::Seq(SequenceType::Tuple, vec![k, v]));
                     }
-                    _wut => bail!("Bad stack top for SETITEM!"),
+                    _wut => {
+                        return Err(PickleError::Eval("Bad stack top for SETITEM".into()));
+                    }
                 }
             }
             PickleOp::SETITEMS => {
                 let kvitems = make_kvlist(stack.pop_mark()?)?;
                 let top = stack
                     .last_mut()
-                    .ok_or_else(|| anyhow!("Unexpected empty stack"))?;
+                    .ok_or_else(|| PickleError::UnexpectedEmptyStack)?;
                 let rtop = memo.resolve_mut(top, true)?;
                 match rtop {
                     Value::Global(_, args) | Value::Seq(SequenceType::Dict, args) => {
                         args.extend(kvitems);
                     }
-                    _wut => bail!("Bad stack top for SETITEMS"),
+                    _wut => {
+                        return Err(PickleError::Eval("Bad stack top for SETITEMS".into()));
+                    }
                 }
             }
             PickleOp::PROTO(proto) => {
-                ensure!(*proto <= MAX_PROTOCOL, "Unsupported protocol {proto}")
+                if !(*proto <= MAX_PROTOCOL) {
+                    return Err(PickleError::Eval(format!("Unsupported protocol {:?}", proto).into()));
+                }
             }
             PickleOp::TUPLE1 => {
                 let t1 = stack.pop()?;
@@ -298,27 +318,31 @@ pub fn evaluate<'a>(
                 let v = stack.pop()?;
                 let top = stack
                     .last_mut()
-                    .ok_or_else(|| anyhow!("Unexpected empty stack"))?;
+                    .ok_or_else(|| PickleError::UnexpectedEmptyStack)?;
                 let rtop = memo.resolve_mut(top, true)?;
                 match rtop {
                     Value::Global(_, args) | Value::Seq(SequenceType::List, args) => {
                         args.push(v);
                     }
-                    _wut => bail!("Bad stack top for APPEND!"),
+                    _wut => {
+                        return Err(PickleError::Eval("Bad stack top for APPEND".into()));
+                    }
                 }
             }
             PickleOp::APPENDS => {
                 let postmark = stack.pop_mark()?;
                 let top = stack
                     .last_mut()
-                    .ok_or_else(|| anyhow!("Unexpected empty stack"))?;
+                    .ok_or_else(|| PickleError::UnexpectedEmptyStack)?;
                 let rtop = memo.resolve_mut(top, true)?;
 
                 match rtop {
                     Value::Global(_, args) | Value::Seq(SequenceType::List, args) => {
                         args.extend(postmark);
                     }
-                    _wut => bail!("Bad stack top for APPENDS"),
+                    _wut => {
+                        return Err(PickleError::Eval("Bad stack top for APPENDS".into()));
+                    }
                 }
             }
             PickleOp::DICT => {
@@ -349,7 +373,7 @@ pub fn evaluate<'a>(
             PickleOp::PUT(midstr) => {
                 // Note: This technically incorrect since the memo id could actually be a string, but
                 // it doesn't seem like that happens in practice.
-                let mid = midstr.parse()?;
+                let mid = midstr.parse().map_err(|e| PickleError::ParseInt(e))?;
                 memo.insert(mid, stack.pop()?);
                 stack.push(Value::Ref(mid));
             }
@@ -362,14 +386,16 @@ pub fn evaluate<'a>(
                 let postmark = stack.pop_mark()?;
                 let top = stack
                     .last_mut()
-                    .ok_or_else(|| anyhow!("Unexpected empty stack"))?;
+                    .ok_or_else(|| PickleError::UnexpectedEmptyStack)?;
                 let rtop = memo.resolve_mut(top, true)?;
 
                 match rtop {
                     Value::Global(_, args) | Value::Seq(SequenceType::Set, args) => {
                         args.extend(postmark);
                     }
-                    _wut => bail!("Bad stack top for ADDITEMS"),
+                    _wut => {
+                        return Err(PickleError::Eval("Bad stack top for ADDITEMS".into()));
+                    }
                 }
             }
             PickleOp::FROZENSET => {
@@ -394,7 +420,7 @@ pub fn evaluate<'a>(
                 ));
             }
             PickleOp::MEMOIZE => {
-                let item = stack.last().ok_or_else(|| anyhow!("Stack underrun"))?;
+                let item = stack.last().ok_or_else(|| PickleError::StackUnderrun)?;
                 memo.insert(memo.0.len() as u32, item.to_owned());
             }
 

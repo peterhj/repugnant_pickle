@@ -1,7 +1,7 @@
 use crate::bigint::BigInt;
 use crate::ops::PickleOp;
 
-use anyhow::Result;
+//use anyhow::Result;
 
 use std::borrow::Cow;
 
@@ -90,9 +90,9 @@ pub enum Value<'a> {
 
 /// Attempt to fix up a value from `Value::Raw(...)` into something
 /// more reasonable.
-pub fn fix_value(val: Value<'_>) -> Result<Value<'_>> {
+pub fn fix_value(val: Value<'_>) -> Value<'_> {
     match val {
-        Value::Raw(ref rv) => Ok(match rv.as_ref() {
+        Value::Raw(ref rv) => match rv.as_ref() {
             PickleOp::BININT(val) => Value::Int(*val as i64),
             PickleOp::BININT1(val) => Value::Int(*val as i64),
             PickleOp::BININT2(val) => Value::Int(*val as i64),
@@ -135,7 +135,7 @@ pub fn fix_value(val: Value<'_>) -> Result<Value<'_>> {
             | PickleOp::LONG1(_)
             | PickleOp::LONG4(_) => Value::RawNum(rv.clone().into_owned()),
             _ => val,
-        }),
-        val => Ok(val),
+        },
+        val => val,
     }
 }

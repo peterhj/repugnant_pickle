@@ -43,11 +43,18 @@
 //! member filename.
 
 use crate::{ops::PickleOp, *};
+use crate::eval::PickleError;
 
-use anyhow::{anyhow, bail, ensure, Ok, Result};
-use smol_str::{SmolStr};
+//use anyhow::{anyhow, bail, ensure, Ok, Result};
+use smol_str::SmolStr;
+use zip::result::ZipError;
 
-use std::{borrow::Cow, fs::File, io::Read, io::Seek, path::Path, str::FromStr};
+//use std::{borrow::Cow, fs::File, io::Read, io::Seek, path::Path, str::FromStr};
+use std::borrow::Cow;
+use std::fs::File;
+use std::io::{Read, Seek, Error as IoError};
+use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorType {
@@ -209,39 +216,49 @@ impl<'a, R: Read + Seek> RepugnantTorchTensorsIter<'a, R> {
     }*/
 }
 
+#[derive(Debug)]
+pub enum RepugnantTorchError {
+    Io(IoError),
+    Zip(ZipError),
+    Zip_(SmolStr),
+    Nom(SmolStr),
+    Pickle(PickleError),
+    Parse(SmolStr),
+}
+
 pub struct RepugnantTorchFile<R=File> {
     zipfile: zip::ZipArchive<R>,
     tensors: Vec<RepugnantTorchTensor>,
 }
 
 impl RepugnantTorchFile {
-    pub fn open<P: AsRef<Path>>(filename: P) -> Result<Self> {
-        Self::new(File::open(filename)?)
+    pub fn open<P: AsRef<Path>>(filename: P) -> Result<Self, RepugnantTorchError> {
+        Self::new(File::open(filename).map_err(|e| RepugnantTorchError::Io(e))?)
     }
 }
 
 impl<R: Read + Seek> RepugnantTorchFile<R> {
-    pub fn new(reader: R) -> Result<Self> {
-        let mut zp = zip::ZipArchive::new(reader)?;
+    pub fn new(reader: R) -> Result<Self, RepugnantTorchError> {
+        let mut zp = zip::ZipArchive::new(reader).map_err(|e| RepugnantTorchError::Zip(e))?;
 
         let datafn = zp
             .file_names()
             .find(|s| s.ends_with("/data.pkl"))
             .map(str::to_owned)
-            .ok_or_else(|| anyhow!("Could not find data.pkl in archive"))?;
+            .ok_or_else(|| RepugnantTorchError::Zip_("Could not find data.pkl in archive".into()))?;
         let (pfx, _) = datafn.rsplit_once('/').unwrap();
-        let mut zf = zp.by_name(&datafn)?;
+        let mut zf = zp.by_name(&datafn).map_err(|e| RepugnantTorchError::Zip(e))?;
         //println!("DEBUG: RepugnantTorchFile: compression={:?}", zf.compression());
         let mut buf = Vec::with_capacity(zf.size() as usize);
-        let _ = zf.read_to_end(&mut buf)?;
+        let _ = zf.read_to_end(&mut buf).map_err(|e| RepugnantTorchError::Io(e))?;
         drop(zf);
         let (_remain, ops) = parse_ops::<nom::error::VerboseError<&[u8]>>(&buf)
-            .map_err(|e| anyhow!("Parse error: {:?}", e))?;
+            .map_err(|e| RepugnantTorchError::Nom(format!("{:?}", e).into()))?;
 
         // Why _wouldn't_ there be random garbage left after parsing the pickle?
         // ensure!(!remain.is_empty(), "Unexpected remaining data in pickle");
 
-        let (vals, _memo) = evaluate(&ops, true)?;
+        let (vals, _memo) = evaluate(&ops, true).map_err(|e| RepugnantTorchError::Pickle(e))?;
         let vals = vals.as_slice();
         //let n_vals = vals.len();
         //println!("DEBUG: RepugnantTorchFile: vals.len={}", n_vals);
@@ -254,7 +271,11 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
         let val = match &vals {
             &[Value::Build(a, _), ..] => a.as_ref(),
             &[Value::Seq(..)] => &vals[0],
-            _ => bail!("Unexpected toplevel type"),
+            _ => {
+                return Err(RepugnantTorchError::Parse(
+                    format!("Unexpected toplevel type").into()
+                ));
+            }
         };
         // Presumably this is usually going to be an OrderedDict, but maybe
         // it can also be a plain old Dict.
@@ -264,13 +285,25 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
                 Value::Raw(rv) if **rv == PickleOp::GLOBAL("collections", "OrderedDict") => {
                     match seq.as_slice() {
                         [_, Value::Seq(SequenceType::Tuple, seq2), ..] => seq2,
-                        _ => bail!("Unexpected value in collections.OrderedDict"),
+                        _ => {
+                            return Err(RepugnantTorchError::Parse(
+                                format!("Unexpected value in collections.OrderedDict").into()
+                            ));
+                        }
                     }
                 }
-                _ => bail!("Unexpected type in toplevel Global"),
+                _ => {
+                    return Err(RepugnantTorchError::Parse(
+                        format!("Unexpected type in toplevel Global").into()
+                    ));
+                }
             },
             Value::Seq(SequenceType::Dict, seq) => seq,
-            _ => bail!("Unexpected type in Build"),
+            _ => {
+                return Err(RepugnantTorchError::Parse(
+                    format!("Unexpected type in Build").into()
+                ));
+            }
         };
         //println!("DEBUG: RepugnantTorchFile: n_val={}", val.len());
         //println!("DEBUG: RepugnantTorchFile: val={:?}", &val);
@@ -278,12 +311,18 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
         for di in val.iter() {
             let (k, v) = match di {
                 Value::Seq(SequenceType::Tuple, seq) if seq.len() == 2 => (&seq[0], &seq[1]),
-                _ => bail!("Could not get key/value for dictionary item"),
+                _ => {
+                    return Err(RepugnantTorchError::Parse(
+                        format!("Could not get key/value for dictionary item").into()
+                    ));
+                }
             };
             let k = if let Value::String(s) = k {
                 *s
             } else {
-                bail!("Dictionary key is not a string");
+                return Err(RepugnantTorchError::Parse(
+                    format!("Dictionary key is not a string").into()
+                ));
             };
             let v = match v {
                 Value::Global(g, seq)
@@ -306,18 +345,30 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
                     [Value::PersId(pidval), Value::Int(offs), Value::Seq(SequenceType::Tuple, shape), Value::Seq(SequenceType::Tuple, stride), Value::Bool(grad), ..] => {
                         (pidval.as_ref(), *offs as u64, shape, stride, *grad)
                     }
-                    _ => bail!("Unexpected value in call to torch._utils._rebuild_tensor_v2"),
+                    _ => {
+                        return Err(RepugnantTorchError::Parse(
+                            format!("Unexpected value in call to torch._utils._rebuild_tensor_v2").into()
+                        ));
+                    }
                 },
-                _ => bail!("Unexpected type in call to torch._utils._rebuild_tensor_v2"),
+                _ => {
+                    return Err(RepugnantTorchError::Parse(
+                        format!("Unexpected type in call to torch._utils._rebuild_tensor_v2").into()
+                    ));
+                }
             };
             // println!("PID: {pidval:?}");
             let fixdim = |v: &[Value]| {
                 v.iter()
                     .map(|x| match x {
                         Value::Int(n) => Ok(*n),
-                        _ => bail!("Bad value for shape/stride item"),
+                        _ => {
+                            return Err(RepugnantTorchError::Parse(
+                                format!("Bad value for shape/stride item").into()
+                            ));
+                        }
                     })
-                    .collect::<Result<Vec<_>>>()
+                    .collect::<Result<Vec<_>, RepugnantTorchError>>()
             };
             let shape = fixdim(shape)?;
             let stride = fixdim(stride)?;
@@ -329,12 +380,24 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
                             PickleOp::GLOBAL("torch", styp) if styp.ends_with("Storage") => {
                                 (&styp[..styp.len() - 7], *sfile, *sdev, *slen as u64)
                             }
-                            _ => bail!("Unexpected storage type part of persistant ID"),
+                            _ => {
+                                return Err(RepugnantTorchError::Parse(
+                                    format!("Unexpected storage type part of persistant ID").into()
+                                ));
+                            }
                         }
                     }
-                    _ => bail!("Unexpected sequence in persistant ID"),
+                    _ => {
+                        return Err(RepugnantTorchError::Parse(
+                            format!("Unexpected sequence in persistant ID").into()
+                        ));
+                    }
                 },
-                _ => bail!("Unexpected value for persistant ID"),
+                _ => {
+                    return Err(RepugnantTorchError::Parse(
+                        format!("Unexpected value for persistant ID").into()
+                    ));
+                }
             };
             let stype = TensorType::from_str(stype);
             let sfile = format!("{pfx}/data/{sfile}");

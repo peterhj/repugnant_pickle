@@ -59,7 +59,7 @@
 //! )]
 //! ```
 
-extern crate anyhow;
+//extern crate anyhow;
 extern crate nom;
 extern crate smol_str;
 extern crate zip;
