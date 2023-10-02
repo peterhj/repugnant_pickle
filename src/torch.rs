@@ -129,25 +129,25 @@ pub struct RepugnantTorchTensor {
     /// Device
     pub device: SmolStr,
 
-    /// Type of tensor.
-    pub tensor_type: std::result::Result<TensorType, SmolStr>,
-
     /// The filename in the ZIP which has storage for this tensor.
-    pub storage: SmolStr,
+    pub storage_key: SmolStr,
 
-    /// Total length (in bytes) for the entire storage item.
-    /// Note that multiple tensors can point to different ranges
-    /// of the item. Or maybe even the same ranges.
-    pub storage_len: u64,
+    /// Absolute offset to the storage file data.
+    pub storage_offset: u64,
 
-    /// Offset into the storage file where this tensor's data starts.
+    /// Total size (in bytes) of the storage file data.
+    pub storage_size: u64,
+
+    /// Offset (in dtype elements) into the storage file for this item.
     /// Torch files don't have ZIP compression enabled so you can
     /// use this for mmaping the whole file and extracting the tensor data.
     /// However bear in mind it won't necessarily be aligned.
-    pub storage_offset: u64,
+    pub storage_start: u64,
 
-    /// Absolute offset into the Torch (zip) file.
-    pub absolute_offset: u64,
+    /// Total length (in dtype elements) for the entire storage item.
+    /// Note that multiple tensors can point to different ranges
+    /// of the item. Or maybe even the same ranges.
+    pub storage_end: u64,
 
     /// The tensor shape (dimensions).
     pub shape: Vec<i64>,
@@ -155,65 +155,11 @@ pub struct RepugnantTorchTensor {
     /// The tensor stride.
     pub stride: Vec<i64>,
 
+    /// Type of tensor.
+    pub type_: std::result::Result<TensorType, SmolStr>,
+
     /// Whether the tensor requires gradients enabled.
     pub requires_grad: bool,
-}
-
-pub struct RepugnantTorchTensorsIter<'a, R> {
-    index: usize,
-    zipfile: &'a mut zip::ZipArchive<R>,
-    tensors: &'a mut [RepugnantTorchTensor],
-}
-
-impl<'a, R: Read + Seek> RepugnantTorchTensorsIter<'a, R> {
-    pub fn _fixup_offsets(&mut self) {
-        loop {
-            if self.index >= self.tensors.len() {
-                return;
-            }
-            let idx = self.index;
-            self.index += 1;
-            // This actually shouldn't ever fail.
-            let zf = self.zipfile.by_name(&self.tensors[idx].storage)
-                                 //.map_err(|_| anyhow!("Missing tensor storage in zip archive"));
-                                 .unwrap();
-            // FIXME FIXME: before, was using anyhow ensure!.
-            assert_eq!(
-                zf.compression(), zip::CompressionMethod::STORE,
-                "Can't handle compressed tensor files",
-            );
-            if self.tensors[idx].absolute_offset == 0 {
-                let offs = self.tensors[idx].storage_offset;
-                self.tensors[idx].absolute_offset = zf.data_start() + offs;
-                assert!(self.tensors[idx].absolute_offset != 0);
-            }
-        }
-    }
-
-    /*// FIXME FIXME: anyhow/result.
-    //pub fn next_tensor(&'a mut self) -> Option<(&'a RepugnantTorchTensor, Result<zip::read::ZipFile<'a>>)> {}
-    pub fn next_tensor(&'a mut self) -> Option<(&'a RepugnantTorchTensor, zip::read::ZipFile<'a>)> {
-        if self.index >= self.tensors.len() {
-            return None;
-        }
-        let idx = self.index;
-        self.index += 1;
-        // This actually shouldn't ever fail.
-        let zf = self.zipfile.by_name(&self.tensors[idx].storage)
-                             //.map_err(|_| anyhow!("Missing tensor storage in zip archive"));
-                             .unwrap();
-        // FIXME FIXME: before, was using anyhow ensure!.
-        assert_eq!(
-            zf.compression(), zip::CompressionMethod::STORE,
-            "Can't handle compressed tensor files",
-        );
-        if self.tensors[idx].absolute_offset == 0 {
-            let offs = self.tensors[idx].storage_offset;
-            self.tensors[idx].absolute_offset = zf.data_start() + offs;
-            assert!(self.tensors[idx].absolute_offset != 0);
-        }
-        Some((&self.tensors[idx], zf))
-    }*/
 }
 
 #[derive(Debug)]
@@ -340,10 +286,10 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
             };
             // println!("\nKey: {k:?}\n{v:?}");
 
-            let (pidval, offs, shape, stride, grad) = match v.as_slice() {
+            let (pidval, soff, shape, stride, grad) = match v.as_slice() {
                 [Value::Seq(SequenceType::Tuple, seq)] => match seq.as_slice() {
-                    [Value::PersId(pidval), Value::Int(offs), Value::Seq(SequenceType::Tuple, shape), Value::Seq(SequenceType::Tuple, stride), Value::Bool(grad), ..] => {
-                        (pidval.as_ref(), *offs as u64, shape, stride, *grad)
+                    [Value::PersId(pidval), Value::Int(soff), Value::Seq(SequenceType::Tuple, shape), Value::Seq(SequenceType::Tuple, stride), Value::Bool(grad), ..] => {
+                        (pidval.as_ref(), *soff as u64, shape, stride, *grad)
                     }
                     _ => {
                         return Err(RepugnantTorchError::Parse(
@@ -372,7 +318,7 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
             };
             let shape = fixdim(shape)?;
             let stride = fixdim(stride)?;
-            // println!("Tensor: shape={shape:?}, stride={stride:?}, offs={offs}, grad={grad:?}");
+            // println!("Tensor: shape={shape:?}, stride={stride:?}, soff={soff}, grad={grad:?}");
             let (stype, sfile, sdev, slen) = match pidval {
                 Value::Seq(SequenceType::Tuple, seq) => match seq.as_slice() {
                     [Value::String("storage"), Value::Raw(op), Value::String(sfile), Value::String(sdev), Value::Int(slen)] => {
@@ -404,18 +350,22 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
 
             // println!("PID: file={sfile}, len={slen}, type={stype:?}, dev={sdev}");
 
-            let offs = offs * stype.as_ref().map(|t| t.size_bytes() as u64).unwrap_or(0);
+            let zf = zp.by_name(&sfile).unwrap();
+            let storage_offset = zf.data_start();
+            let storage_size = zf.size();
+            drop(zf);
+
             tensors.push(RepugnantTorchTensor{
                 name: k.into(),
                 device: sdev.into(),
-                tensor_type: stype,
-                storage: sfile.into(),
-                storage_len: slen,
-                storage_offset: offs,
-                /*absolute_offset: zf.data_start() + offs,*/
-                absolute_offset: 0,
+                storage_key: sfile.into(),
+                storage_offset,
+                storage_size,
+                storage_start: soff,
+                storage_end: slen,
                 shape,
                 stride,
+                type_: stype,
                 requires_grad: grad,
             })
         }
@@ -424,13 +374,5 @@ impl<R: Read + Seek> RepugnantTorchFile<R> {
 
     pub fn tensors(&self) -> &[RepugnantTorchTensor] {
         &self.tensors
-    }
-
-    pub fn iter_tensors_data<'a>(&'a mut self) -> RepugnantTorchTensorsIter<'a, R> {
-        RepugnantTorchTensorsIter{
-            index: 0,
-            zipfile: &mut self.zipfile,
-            tensors: &mut self.tensors,
-        }
     }
 }
